@@ -1,5 +1,8 @@
 import os
 
+import numpy as np
+from sklearn.metrics import f1_score, cohen_kappa_score
+
 import torchvision.models as models
 import torch.nn as nn
 import torch.nn.functional as F  # 导入 functional 模块
@@ -89,15 +92,12 @@ def loss_function(venous_logits, nipple_logits, arrangement_logits, base_transpa
             + lambda_reg * (venous_reg_loss + nipple_reg_loss + arrangement_reg_loss + base_transparency_reg_loss))
 
 
-def calculate_accuracy(logits, labels):
+def calculate_correct(logits, labels):
     _, predicted_classes = torch.max(logits, 1)
     mask = labels != -1
-    if mask.sum().item() == 0:
-        return 0.0
-    correct_predictions = (predicted_classes[mask] == labels[mask]).sum().item()
-    total_samples = mask.sum().item()
-    accuracy = correct_predictions / total_samples
-    return accuracy
+    correct = (predicted_classes[mask] == labels[mask]).sum().item()
+    total = mask.sum().item()
+    return correct, total
 
 
 class MultiTaskEfficientNetB0(nn.Module):
@@ -127,22 +127,8 @@ class MultiTaskEfficientNetB0(nn.Module):
                 self.arrangement_reg(feat), self.base_transparency_reg(feat))
 
 
-def train_epoch(model, dataloader, loss_criterion, optimizer, device):
-    """
-    训练模型一个 epoch.
-
-    Args:
-        model: 待训练的模型.
-        dataloader: 训练数据 DataLoader.
-        loss_criterion: 损失函数.
-        optimizer: 优化器.
-        device: 设备 (CPU 或 CUDA).
-        schedular: 学习率调度器 (可选).
-
-    Returns:
-        avg_loss: 本 epoch 的平均训练损失.
-    """
-    model.train()  # 设置模型为训练模式
+def train_epoch(model, dataloader, loss_criterion, optimizer, device, scaler):
+    model.train()
     running_loss = 0.0
     progress_bar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Training")
     for _, (images, labels) in progress_bar:
@@ -154,49 +140,34 @@ def train_epoch(model, dataloader, loss_criterion, optimizer, device):
 
         optimizer.zero_grad()
 
-        (venous_logits, nipple_logits, arrangement_logits, base_transparency_logits,
-         venous_reg, nipple_reg, arrangement_reg, base_transparency_reg) = model(images)
-        loss = loss_criterion(venous_logits, nipple_logits, arrangement_logits, base_transparency_logits,
-                              venous_reg, nipple_reg, arrangement_reg, base_transparency_reg,
-                              venous_labels, nipple_labels, arrangement_labels, base_transparency_labels)
+        with torch.cuda.amp.autocast():
+            (venous_logits, nipple_logits, arrangement_logits, base_transparency_logits,
+             venous_reg, nipple_reg, arrangement_reg, base_transparency_reg) = model(images)
+            loss = loss_criterion(venous_logits, nipple_logits, arrangement_logits, base_transparency_logits,
+                                  venous_reg, nipple_reg, arrangement_reg, base_transparency_reg,
+                                  venous_labels, nipple_labels, arrangement_labels, base_transparency_labels)
 
-        loss.backward()  # 反向传播
-        optimizer.step()  # 更新参数
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         running_loss += loss.item()
+        progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
 
-        # 更新 tqdm 进度条的 postfix (显示loss信息)
-        progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})  # 显示当前 batch loss
-
-    avg_loss = running_loss / len(dataloader)  # 计算平均 epoch loss
+    avg_loss = running_loss / len(dataloader)
     return avg_loss
 
 
-def evaluate_epoch(model, dataloader, loss_criterion, device, calculate_accuracy_fn):
-    """
-    评估模型在一个 epoch 的性能 (在验证集或测试集上).
-
-    Args:
-        model: 待评估的模型.
-        dataloader: 验证/测试数据 DataLoader.
-        loss_criterion: 损失函数.
-        device: 设备 (CPU 或 CUDA).
-        calculate_accuracy_fn: 计算准确率的函数.
-
-    Returns:
-        avg_loss: 本 epoch 的平均验证/测试损失.
-        arrangement_accuracy: Arrangement 分类准确率.
-        nipple_accuracy: Nipple 分类准确率.
-    """
+def evaluate_epoch(model, dataloader, loss_criterion, device):
     model.eval()
     val_loss = 0.0
-    venous_accuracies = []
-    nipple_accuracies = []
-    arrangement_accuracies = []
-    base_transparency_accuracies = []
+    correct = {'venous': 0, 'nipple': 0, 'arrangement': 0, 'base_transparency': 0}
+    total = {'venous': 0, 'nipple': 0, 'arrangement': 0, 'base_transparency': 0}
+    all_preds = {'venous': [], 'nipple': [], 'arrangement': [], 'base_transparency': []}
+    all_labels = {'venous': [], 'nipple': [], 'arrangement': [], 'base_transparency': []}
 
     progress_bar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Validation")
-    with torch.no_grad():
+    with torch.no_grad(), torch.cuda.amp.autocast():
         for _, (val_images, val_labels) in progress_bar:
             val_images = val_images.to(device)
             val_venous_labels = val_labels['venous'].to(device)
@@ -211,31 +182,45 @@ def evaluate_epoch(model, dataloader, loss_criterion, device, calculate_accuracy
                                             val_venous_labels, val_nipple_labels, val_arrangement_labels, val_base_transparency_labels)
             val_loss += val_loss_batch.item()
 
-            venous_acc = calculate_accuracy_fn(val_venous_logits, val_venous_labels)
-            nipple_acc = calculate_accuracy_fn(val_nipple_logits, val_nipple_labels)
-            arrangement_acc = calculate_accuracy_fn(val_arrangement_logits, val_arrangement_labels)
-            base_transparency_acc = calculate_accuracy_fn(val_base_transparency_logits, val_base_transparency_labels)
+            for name, logits, labels_t in [
+                ('venous', val_venous_logits, val_venous_labels),
+                ('nipple', val_nipple_logits, val_nipple_labels),
+                ('arrangement', val_arrangement_logits, val_arrangement_labels),
+                ('base_transparency', val_base_transparency_logits, val_base_transparency_labels),
+            ]:
+                c, n = calculate_correct(logits, labels_t)
+                correct[name] += c
+                total[name] += n
 
-            venous_accuracies.append(venous_acc)
-            nipple_accuracies.append(nipple_acc)
-            arrangement_accuracies.append(arrangement_acc)
-            base_transparency_accuracies.append(base_transparency_acc)
+                _, preds = torch.max(logits, 1)
+                mask = labels_t != -1
+                all_preds[name].append(preds[mask].cpu().numpy())
+                all_labels[name].append(labels_t[mask].cpu().numpy())
 
             progress_bar.set_postfix({
                 'loss': f'{val_loss_batch.item():.4f}',
-                'ven': f'{venous_acc:.2f}',
-                'nip': f'{nipple_acc:.2f}',
-                'arr': f'{arrangement_acc:.2f}',
-                'btr': f'{base_transparency_acc:.2f}'
+                'ven': f'{correct["venous"] / max(total["venous"], 1):.2f}',
+                'nip': f'{correct["nipple"] / max(total["nipple"], 1):.2f}',
+                'arr': f'{correct["arrangement"] / max(total["arrangement"], 1):.2f}',
+                'btr': f'{correct["base_transparency"] / max(total["base_transparency"], 1):.2f}',
             })
 
     avg_val_loss = val_loss / len(dataloader)
-    venous_val_accuracy = sum(venous_accuracies) / len(venous_accuracies)
-    nipple_val_accuracy = sum(nipple_accuracies) / len(nipple_accuracies)
-    arrangement_val_accuracy = sum(arrangement_accuracies) / len(arrangement_accuracies)
-    base_transparency_val_accuracy = sum(base_transparency_accuracies) / len(base_transparency_accuracies)
 
-    return avg_val_loss, venous_val_accuracy, nipple_val_accuracy, arrangement_val_accuracy, base_transparency_val_accuracy
+    metrics = {}
+    for name in ['venous', 'nipple', 'arrangement', 'base_transparency']:
+        acc = correct[name] / max(total[name], 1)
+        preds_all = np.concatenate(all_preds[name]) if all_preds[name] else np.array([])
+        labels_all = np.concatenate(all_labels[name]) if all_labels[name] else np.array([])
+        if len(labels_all) > 0 and len(np.unique(labels_all)) > 1:
+            macro_f1 = f1_score(labels_all, preds_all, average='macro')
+            qwk = cohen_kappa_score(labels_all, preds_all, weights='quadratic')
+        else:
+            macro_f1 = 0.0
+            qwk = 0.0
+        metrics[name] = {'acc': acc, 'f1': macro_f1, 'qwk': qwk}
+
+    return avg_val_loss, metrics
 
 
 def main(args):
@@ -256,7 +241,7 @@ def main(args):
 
     # --- Transform ---
     train_transform = transforms.Compose([
-        transforms.Resize((1024, 1024)),
+        transforms.Resize((512, 512)),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.ToTensor(),
@@ -264,7 +249,7 @@ def main(args):
                              std=[0.229, 0.224, 0.225])
     ])
     val_transform = transforms.Compose([
-        transforms.Resize((1024, 1024)),
+        transforms.Resize((512, 512)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])
@@ -290,6 +275,7 @@ def main(args):
     model.to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
+    scaler = torch.cuda.amp.GradScaler()
     def criterion(*loss_args):
         return loss_function(*loss_args, lambda_reg=args.lambda_reg, sigma=args.sigma)
 
@@ -298,21 +284,21 @@ def main(args):
 
     logging.info("Starting Training...")
     for epoch in range(args.epochs):
-        avg_train_loss = train_epoch(model, train_loader, criterion, optimizer, args.device)
+        avg_train_loss = train_epoch(model, train_loader, criterion, optimizer, args.device, scaler)
         scheduler.step()
         logging.info(f"Epoch [{epoch + 1}/{args.epochs}] - Training Loss: {avg_train_loss:.4f}")
 
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
-            avg_val_loss, venous_val_acc, nipple_val_acc, arrangement_val_acc, base_transparency_val_acc = evaluate_epoch(
-                model, val_loader, criterion, args.device, calculate_accuracy
+            avg_val_loss, metrics = evaluate_epoch(
+                model, val_loader, criterion, args.device
             )
-            total_val_acc = (venous_val_acc + nipple_val_acc + arrangement_val_acc + base_transparency_val_acc) / 4
+            total_val_acc = sum(m['acc'] for m in metrics.values()) / len(metrics)
             logging.info(
                 f"Epoch [{epoch + 1}/{args.epochs}] - Validation Loss: {avg_val_loss:.4f} | "
-                f"Venous Acc: {venous_val_acc:.4f} | "
-                f"Nipple Acc: {nipple_val_acc:.4f} | "
-                f"Arrangement Acc: {arrangement_val_acc:.4f} | "
-                f"BaseTransparency Acc: {base_transparency_val_acc:.4f} | "
+                f"Venous: Acc: {metrics['venous']['acc']:.4f} | F1: {metrics['venous']['f1']:.4f} | QWK: {metrics['venous']['qwk']:.4f} | "
+                f"Nipple: Acc: {metrics['nipple']['acc']:.4f} | F1: {metrics['nipple']['f1']:.4f} | QWK: {metrics['nipple']['qwk']:.4f} | "
+                f"Arrangement: Acc: {metrics['arrangement']['acc']:.4f} | F1: {metrics['arrangement']['f1']:.4f} | QWK: {metrics['arrangement']['qwk']:.4f} | "
+                f"BaseTransparency: Acc: {metrics['base_transparency']['acc']:.4f} | F1: {metrics['base_transparency']['f1']:.4f} | QWK: {metrics['base_transparency']['qwk']:.4f} | "
                 f"Avg. Val Acc: {total_val_acc:.4f}"
             )
 
@@ -340,15 +326,15 @@ if __name__ == '__main__':
     parser.add_argument('--train_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/train', help="Path to training image directory")
     parser.add_argument('--val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json', help="Path to validation annotation file")
     parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val', help="Path to validation image directory")
-    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V7/', help="Directory to save models and logs")
+    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V5_224/', help="Directory to save models and logs")
     parser.add_argument('--model_save_name', type=str, default='effiecientnet_classification',
                         help="Directory to save models and logs")
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--epochs', type=int, default=150)
     parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--eval_freq', type=int, default=4, help="Evaluate every N epochs")
-    parser.add_argument('--patience', type=int, default=5, help="Early stopping patience (eval cycles)")
+    parser.add_argument('--patience', type=int, default=10, help="Early stopping patience (eval cycles)")
     parser.add_argument('--sigma', type=float, default=0.5, help="Gaussian sigma for ordinal soft labels")
     parser.add_argument('--lambda_reg', type=float, default=0.3, help="Weight for regression loss")
 

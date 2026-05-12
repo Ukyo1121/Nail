@@ -7,22 +7,22 @@ import argparse
 import cv2
 import numpy as np
 from PIL import Image
+from sklearn.metrics import f1_score, cohen_kappa_score
 
 from shape_tubes_dataset import ClassificationDataset
-from train_efficientnet import MultiTaskEfficientNetB0, loss_function, calculate_accuracy
+from train_efficientnet import MultiTaskEfficientNetB0, loss_function, calculate_correct
 
 
 def evaluate(model, dataloader, device):
     model.eval()
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=-1)
 
     task_names = ['venous', 'nipple', 'arrangement', 'base_transparency']
     task_correct = {t: 0 for t in task_names}
     task_total = {t: 0 for t in task_names}
-    # 每个任务下每个类别的 TP 和 FN，用于计算 per-class recall
     task_tp = {t: {} for t in task_names}
     task_fn = {t: {} for t in task_names}
-    total_loss = 0.0
+    all_preds = {t: [] for t in task_names}
+    all_labels = {t: [] for t in task_names}
 
     with torch.no_grad():
         for images, labels in tqdm(dataloader, desc="Evaluating"):
@@ -33,12 +33,6 @@ def evaluate(model, dataloader, device):
             base_transparency_labels = labels['base_transparency'].to(device)
 
             venous_logits, nipple_logits, arrangement_logits, base_transparency_logits, _, _, _, _ = model(images)
-
-            loss = criterion(venous_logits, venous_labels) + \
-                   criterion(nipple_logits, nipple_labels) + \
-                   criterion(arrangement_logits, arrangement_labels) + \
-                   criterion(base_transparency_logits, base_transparency_labels)
-            total_loss += loss.item()
 
             for logits, label_t, name in [
                 (venous_logits, venous_labels, 'venous'),
@@ -51,7 +45,9 @@ def evaluate(model, dataloader, device):
                 task_correct[name] += (preds[mask] == label_t[mask]).sum().item()
                 task_total[name] += mask.sum().item()
 
-                # 累计每个类别的 TP / FN
+                all_preds[name].append(preds[mask].cpu().numpy())
+                all_labels[name].append(label_t[mask].cpu().numpy())
+
                 for c in label_t[mask].unique().tolist():
                     c = int(c)
                     gt_c = label_t[mask] == c
@@ -61,11 +57,9 @@ def evaluate(model, dataloader, device):
                     task_tp[name][c] = task_tp[name].get(c, 0) + tp
                     task_fn[name][c] = task_fn[name].get(c, 0) + fn
 
-    avg_loss = total_loss / len(dataloader)
-    print(f"\nAverage Loss: {avg_loss:.4f}")
+    print()
     for name in task_names:
         acc = task_correct[name] / task_total[name] if task_total[name] > 0 else 0.0
-        # 每个类别的 recall
         all_classes = sorted(set(task_tp[name].keys()) | set(task_fn[name].keys()))
         class_recalls = []
         recall_strs = []
@@ -76,10 +70,22 @@ def evaluate(model, dataloader, device):
             class_recalls.append(r)
             recall_strs.append(f"C{c}={r:.4f}")
         macro_recall = sum(class_recalls) / len(class_recalls) if class_recalls else 0.0
-        print(f"  {name:>20s}  Accuracy: {acc:.4f}  ({task_correct[name]}/{task_total[name]})  Recall(macro): {macro_recall:.4f}  [{', '.join(recall_strs)}]")
+
+        preds_all = np.concatenate(all_preds[name]) if all_preds[name] else np.array([])
+        labels_all = np.concatenate(all_labels[name]) if all_labels[name] else np.array([])
+        if len(labels_all) > 0 and len(np.unique(labels_all)) > 1:
+            macro_f1 = f1_score(labels_all, preds_all, average='macro')
+            qwk = cohen_kappa_score(labels_all, preds_all, weights='quadratic')
+        else:
+            macro_f1 = 0.0
+            qwk = 0.0
+
+        print(f"  {name:>20s}  Acc: {acc:.4f} | F1: {macro_f1:.4f} | QWK: {qwk:.4f}  ({task_correct[name]}/{task_total[name]})  Recall(macro): {macro_recall:.4f}  [{', '.join(recall_strs)}]")
 
     avg_acc = sum(task_correct[t] / task_total[t] if task_total[t] > 0 else 0.0 for t in task_names) / len(task_names)
     avg_recall = 0.0
+    avg_f1 = 0.0
+    avg_qwk = 0.0
     for t in task_names:
         all_classes = sorted(set(task_tp[t].keys()) | set(task_fn[t].keys()))
         cr = []
@@ -88,8 +94,17 @@ def evaluate(model, dataloader, device):
             fn = task_fn[t].get(c, 0)
             cr.append(tp / (tp + fn) if (tp + fn) > 0 else 0.0)
         avg_recall += sum(cr) / len(cr) if cr else 0.0
+
+        preds_all = np.concatenate(all_preds[t]) if all_preds[t] else np.array([])
+        labels_all = np.concatenate(all_labels[t]) if all_labels[t] else np.array([])
+        if len(labels_all) > 0 and len(np.unique(labels_all)) > 1:
+            avg_f1 += f1_score(labels_all, preds_all, average='macro')
+            avg_qwk += cohen_kappa_score(labels_all, preds_all, weights='quadratic')
+
     avg_recall /= len(task_names)
-    print(f"  {'Average':>20s}  Accuracy: {avg_acc:.4f}  Recall(macro): {avg_recall:.4f}")
+    avg_f1 /= len(task_names)
+    avg_qwk /= len(task_names)
+    print(f"  {'Average':>20s}  Acc: {avg_acc:.4f} | F1: {avg_f1:.4f} | QWK: {avg_qwk:.4f}  Recall(macro): {avg_recall:.4f}")
 
 
 def visualize(model, dataset, device, vis_dir, max_samples=50):
@@ -100,7 +115,7 @@ def visualize(model, dataset, device, vis_dir, max_samples=50):
     task_names = ['venous', 'nipple', 'arrangement', 'base_transparency']
 
     eval_transform = transforms.Compose([
-        transforms.Resize((1024, 1024)),
+        transforms.Resize((512, 512)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -171,7 +186,7 @@ def visualize(model, dataset, device, vis_dir, max_samples=50):
 
 def main(args):
     val_transform = transforms.Compose([
-        transforms.Resize((1024, 1024)),
+        transforms.Resize((512, 512)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
