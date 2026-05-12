@@ -101,7 +101,7 @@ def calculate_correct(logits, labels):
 
 
 class TaskHead(nn.Module):
-    def __init__(self, in_dim, num_classes, hidden=512, dropout=0.3):
+    def __init__(self, in_dim, num_classes, hidden=128, dropout=0.5):
         super().__init__()
         self.head = nn.Sequential(
             nn.Linear(in_dim, hidden),
@@ -340,7 +340,7 @@ if __name__ == '__main__':
     parser.add_argument('--train_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/train', help="Path to training image directory")
     parser.add_argument('--val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json', help="Path to validation annotation file")
     parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val', help="Path to validation image directory")
-    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V6/', help="Directory to save models and logs")
+    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V6_single_dropout/', help="Directory to save models and logs")
     parser.add_argument('--model_save_name', type=str, default='effiecientnet_classification',
                         help="Directory to save models and logs")
     parser.add_argument('--batch_size', type=int, default=8)
