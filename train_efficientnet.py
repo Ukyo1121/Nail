@@ -100,20 +100,6 @@ def calculate_correct(logits, labels):
     return correct, total
 
 
-class TaskHead(nn.Module):
-    def __init__(self, in_dim, num_classes, hidden=512, dropout=0.3):
-        super().__init__()
-        self.head = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, num_classes),
-        )
-
-    def forward(self, x):
-        return self.head(x)
-
-
 class MultiTaskEfficientNetB0(nn.Module):
     def __init__(self, num_venous_classes, num_nipple_classes, num_arrangement_classes, num_base_transparency_classes, pretrained=True):
         super(MultiTaskEfficientNetB0, self).__init__()
@@ -122,10 +108,10 @@ class MultiTaskEfficientNetB0(nn.Module):
         self.backbone.classifier = nn.Identity()
 
         # 分类头
-        self.venous_fc = TaskHead(in_features, num_venous_classes)
-        self.nipple_fc = TaskHead(in_features, num_nipple_classes)
-        self.arrangement_fc = TaskHead(in_features, num_arrangement_classes)
-        self.base_transparency_fc = TaskHead(in_features, num_base_transparency_classes)
+        self.venous_fc = nn.Linear(in_features, num_venous_classes)
+        self.nipple_fc = nn.Linear(in_features, num_nipple_classes)
+        self.arrangement_fc = nn.Linear(in_features, num_arrangement_classes)
+        self.base_transparency_fc = nn.Linear(in_features, num_base_transparency_classes)
 
         # 回归头
         self.venous_reg = nn.Linear(in_features, 1)
@@ -340,7 +326,7 @@ if __name__ == '__main__':
     parser.add_argument('--train_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/train', help="Path to training image directory")
     parser.add_argument('--val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json', help="Path to validation annotation file")
     parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val', help="Path to validation image directory")
-    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V6/', help="Directory to save models and logs")
+    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V5_224/', help="Directory to save models and logs")
     parser.add_argument('--model_save_name', type=str, default='effiecientnet_classification',
                         help="Directory to save models and logs")
     parser.add_argument('--batch_size', type=int, default=8)
