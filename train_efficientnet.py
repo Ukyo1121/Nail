@@ -3,19 +3,19 @@ import os
 import numpy as np
 from sklearn.metrics import f1_score, cohen_kappa_score
 
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-
+import torchvision.models as models
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as F  # 导入 functional 模块
 from torch import optim
 import torch
 from torch.utils.data import DataLoader
 from torchvision.models import efficientnet_b0
+from torchvision import transforms
 from tqdm import tqdm
 import logging
 from datetime import datetime
 import argparse
+import math
 
 from shape_tubes_dataset import ClassificationDataset
 
@@ -140,7 +140,7 @@ def train_epoch(model, dataloader, loss_criterion, optimizer, device, scaler):
 
         optimizer.zero_grad()
 
-        with torch.amp.autocast('cuda'):
+        with torch.cuda.amp.autocast():
             (venous_logits, nipple_logits, arrangement_logits, base_transparency_logits,
              venous_reg, nipple_reg, arrangement_reg, base_transparency_reg) = model(images)
             loss = loss_criterion(venous_logits, nipple_logits, arrangement_logits, base_transparency_logits,
@@ -167,7 +167,7 @@ def evaluate_epoch(model, dataloader, loss_criterion, device):
     all_labels = {'venous': [], 'nipple': [], 'arrangement': [], 'base_transparency': []}
 
     progress_bar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Validation")
-    with torch.no_grad(), torch.amp.autocast('cuda'):
+    with torch.no_grad(), torch.cuda.amp.autocast():
         for _, (val_images, val_labels) in progress_bar:
             val_images = val_images.to(device)
             val_venous_labels = val_labels['venous'].to(device)
@@ -239,24 +239,20 @@ def main(args):
         ]
     )
 
-    # --- Transform (Albumentations) ---
-    IMG_SIZE = args.img_size
-
-    train_transform = A.Compose([
-        A.RandomResizedCrop(size=(IMG_SIZE, IMG_SIZE), scale=(0.7, 1.0)),
-        A.HorizontalFlip(p=0.5),
-        A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=10, p=0.5, border_mode=0),
-        A.RandomBrightnessContrast(0.2, 0.2, p=0.6),
-        A.CLAHE(clip_limit=2.0, p=0.4),
-        A.GaussNoise(var_limit=(5.0, 20.0), p=0.2),
-        A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-        ToTensorV2(),
+    # --- Transform ---
+    train_transform = transforms.Compose([
+        transforms.Resize((512, 512)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
     ])
-
-    val_transform = A.Compose([
-        A.Resize(IMG_SIZE, IMG_SIZE),
-        A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-        ToTensorV2(),
+    val_transform = transforms.Compose([
+        transforms.Resize((512, 512)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
     ])
 
     # --- Dataset ---
@@ -279,14 +275,14 @@ def main(args):
     model.to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.cuda.amp.GradScaler()
     def criterion(*loss_args):
         return loss_function(*loss_args, lambda_reg=args.lambda_reg, sigma=args.sigma)
 
     best_val_accuracy = 0.0
     early_stopping = EarlyStopping(patience=args.patience)
 
-    logging.info(f"Starting Training... | IMG_SIZE={IMG_SIZE}")
+    logging.info("Starting Training...")
     for epoch in range(args.epochs):
         avg_train_loss = train_epoch(model, train_loader, criterion, optimizer, args.device, scaler)
         scheduler.step()
@@ -330,7 +326,7 @@ if __name__ == '__main__':
     parser.add_argument('--train_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/train', help="Path to training image directory")
     parser.add_argument('--val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json', help="Path to validation annotation file")
     parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val', help="Path to validation image directory")
-    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V7_1024/', help="Directory to save models and logs")
+    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V5_224/', help="Directory to save models and logs")
     parser.add_argument('--model_save_name', type=str, default='effiecientnet_classification',
                         help="Directory to save models and logs")
     parser.add_argument('--batch_size', type=int, default=8)
@@ -341,7 +337,6 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=10, help="Early stopping patience (eval cycles)")
     parser.add_argument('--sigma', type=float, default=0.5, help="Gaussian sigma for ordinal soft labels")
     parser.add_argument('--lambda_reg', type=float, default=0.3, help="Weight for regression loss")
-    parser.add_argument('--img_size', type=int, default=1024, help="Input image size (square)")
 
     args = parser.parse_args()
     main(args)
