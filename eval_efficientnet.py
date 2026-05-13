@@ -7,13 +7,14 @@ import argparse
 import cv2
 import numpy as np
 from PIL import Image
+from datetime import datetime
 from sklearn.metrics import f1_score, cohen_kappa_score
 
 from shape_tubes_dataset import ClassificationDataset
-from train_efficientnet import MultiTaskEfficientNetB0, loss_function, calculate_correct
+from train_efficientnet import MultiTaskEfficientNetB0
 
 
-def evaluate(model, dataloader, device):
+def evaluate(model, dataloader, device, log_path=None):
     model.eval()
 
     task_names = ['venous', 'nipple', 'arrangement', 'base_transparency']
@@ -57,7 +58,8 @@ def evaluate(model, dataloader, device):
                     task_tp[name][c] = task_tp[name].get(c, 0) + tp
                     task_fn[name][c] = task_fn[name].get(c, 0) + fn
 
-    print()
+    lines = []
+    lines.append("")
     for name in task_names:
         acc = task_correct[name] / task_total[name] if task_total[name] > 0 else 0.0
         all_classes = sorted(set(task_tp[name].keys()) | set(task_fn[name].keys()))
@@ -80,7 +82,9 @@ def evaluate(model, dataloader, device):
             macro_f1 = 0.0
             qwk = 0.0
 
-        print(f"  {name:>20s}  Acc: {acc:.4f} | F1: {macro_f1:.4f} | QWK: {qwk:.4f}  ({task_correct[name]}/{task_total[name]})  Recall(macro): {macro_recall:.4f}  [{', '.join(recall_strs)}]")
+        line = f"  {name:>20s}  Acc: {acc:.4f} | F1: {macro_f1:.4f} | QWK: {qwk:.4f}  ({task_correct[name]}/{task_total[name]})  Recall(macro): {macro_recall:.4f}  [{', '.join(recall_strs)}]"
+        print(line)
+        lines.append(line)
 
     avg_acc = sum(task_correct[t] / task_total[t] if task_total[t] > 0 else 0.0 for t in task_names) / len(task_names)
     avg_recall = 0.0
@@ -104,7 +108,13 @@ def evaluate(model, dataloader, device):
     avg_recall /= len(task_names)
     avg_f1 /= len(task_names)
     avg_qwk /= len(task_names)
-    print(f"  {'Average':>20s}  Acc: {avg_acc:.4f} | F1: {avg_f1:.4f} | QWK: {avg_qwk:.4f}  Recall(macro): {avg_recall:.4f}")
+    avg_line = f"  {'Average':>20s}  Acc: {avg_acc:.4f} | F1: {avg_f1:.4f} | QWK: {avg_qwk:.4f}  Recall(macro): {avg_recall:.4f}"
+    print(avg_line)
+    lines.append(avg_line)
+
+    if log_path:
+        with open(log_path, 'a') as f:
+            f.write('\n'.join(lines) + '\n')
 
 
 def visualize(model, dataset, device, vis_dir, max_samples=50):
@@ -186,7 +196,7 @@ def visualize(model, dataset, device, vis_dir, max_samples=50):
 
 def main(args):
     val_transform = transforms.Compose([
-        transforms.Resize((512, 512)),
+        transforms.Resize((1024, 1024)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -202,8 +212,18 @@ def main(args):
     model.load_state_dict(torch.load(args.model_path, map_location=args.device))
     model.to(args.device)
 
-    print(f"Loaded model from {args.model_path}")
-    evaluate(model, val_loader, args.device)
+    model_dir = os.path.dirname(os.path.abspath(args.model_path))
+    log_path = os.path.join(model_dir, 'logs/eval_logs.txt')
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    header = f"[{timestamp}] Eval model: {args.model_path}"
+    print(header)
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir, exist_ok=True)
+    with open(log_path, 'a') as f:
+        f.write(f"{'='*60}\n{header}\n{'='*60}\n")
+
+    evaluate(model, val_loader, args.device, log_path)
 
     if args.vis_dir:
         visualize(model, val_dataset, args.device, args.vis_dir, max_samples=args.vis_max)
@@ -211,7 +231,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Evaluate multi-task EfficientNet-B0")
-    parser.add_argument('--model_path', type=str, default='./work_dir/models/classification/V4/effiecientnet_classification_best.pth', help="Path to trained .pth model")
+    parser.add_argument('--model_path', type=str, default='./work_dir/models/classification/V7_1024/effiecientnet_classification_best.pth', help="Path to trained .pth model")
     parser.add_argument('--val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json')
     parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val')
     parser.add_argument('--batch_size', type=int, default=8)

@@ -9,6 +9,12 @@ from PIL import Image
 import json
 
 from torchvision import transforms
+
+try:
+    import albumentations as A
+    _HAS_ALB = True
+except ImportError:
+    _HAS_ALB = False
 # from utils import detection_collate_fn
 
 
@@ -255,6 +261,15 @@ class ClassificationDataset(Dataset):
         for cat in self.coco_data['categories']:
             self.cat_id_to_attr[cat['id']] = cat['name']
 
+    @staticmethod
+    def _apply_transform(transform, image):
+        if _HAS_ALB and isinstance(transform, A.Compose):
+            image_np = np.array(image)
+            result = transform(image=image_np)
+            return result['image']
+        else:
+            return transform(image)
+
     def __len__(self):
         return len(self.image_ids)
 
@@ -275,13 +290,13 @@ class ClassificationDataset(Dataset):
                 targets[attr_name] = int(ann['attributes'][attr_name])
 
         if self.transform:
-            image = self.transform(image)
+            image = self._apply_transform(self.transform, image)
 
         if self.band_dir is not None:
             basename = os.path.splitext(image_filename)[0]
             band_path = os.path.join(self.band_dir, f"{basename}_band.jpg")
             band_image = Image.open(band_path).convert('RGB')
-            band_image = self.band_transform(band_image)
+            band_image = self._apply_transform(self.band_transform, band_image)
             return image, band_image, targets
 
         return image, targets
