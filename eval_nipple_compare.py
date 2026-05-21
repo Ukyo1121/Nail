@@ -7,19 +7,20 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torchvision.models import efficientnet_b0
+from torchvision.models import mobilenet_v3_large
 from torchvision import transforms
 from tqdm import tqdm
 import argparse
 from sklearn.metrics import cohen_kappa_score
+
 from shape_tubes_dataset import ClassificationDataset
 
 
 class NippleOnlyModel(nn.Module):
     def __init__(self, num_classes, pretrained=True, dropout=0.0):
         super().__init__()
-        self.backbone = efficientnet_b0(pretrained=pretrained)
-        in_features = self.backbone.classifier[1].in_features
+        self.backbone = mobilenet_v3_large(pretrained=pretrained)
+        in_features = self.backbone.classifier[0].in_features
         self.backbone.classifier = nn.Identity()
         self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
         self.fc = nn.Linear(in_features, num_classes)

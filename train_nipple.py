@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import optim
 from torch.utils.data import DataLoader
-from torchvision.models import efficientnet_b0
+from torchvision.models import mobilenet_v3_large
 from torchvision import transforms
 from tqdm import tqdm
 import logging
@@ -22,14 +22,14 @@ from shape_tubes_dataset import ClassificationDataset
 
 
 class NippleOnlyModel(nn.Module):
-    """只保留 nipple 分类头（分类 + 回归）的模型。"""
+    """只保留 nipple 分类头（分类 + 回归）的模型，backbone 使用 MobileNetV3-Large。"""
     def __init__(self, num_classes, pretrained=True, freeze_blocks=0, dropout=0.0):
         super().__init__()
-        self.backbone = efficientnet_b0(pretrained=pretrained)
-        in_features = self.backbone.classifier[1].in_features
+        self.backbone = mobilenet_v3_large(pretrained=pretrained)
+        in_features = self.backbone.classifier[0].in_features  # 960
         self.backbone.classifier = nn.Identity()
 
-        # 冻结 backbone 前 freeze_blocks 层
+        # 冻结 backbone 前 freeze_blocks 层 (features 共 ~18 层)
         for i in range(freeze_blocks):
             for param in self.backbone.features[i].parameters():
                 param.requires_grad = False
@@ -212,23 +212,23 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str, default="band", choices=["original", "band"],
+    parser.add_argument("--mode", type=str, default="original", choices=["original", "band"],
                         help="original: nipple 用原图; band: nipple 用 band 裁剪")
     parser.add_argument("--train_ann", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/train_classification.json")
     parser.add_argument("--train_dir", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/train")
     parser.add_argument("--val_ann", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json")
     parser.add_argument("--val_dir", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val")
     parser.add_argument("--band_dir", type=str, default="/home/suzhiling/efficientnet/bands/v2", help="band 裁剪根目录，下含 train/ val/")
-    parser.add_argument("--output_dir", type=str, default="./work_dir/models/nipple_test_band/V7")
+    parser.add_argument("--output_dir", type=str, default="./work_dir/models/nipple_test_original/V8")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=30, help="早停耐心值，连续无改善则停止")
     parser.add_argument("--sigma", type=float, default=0.5, help="Gaussian sigma for ordinal soft labels")
     parser.add_argument("--lambda_reg", type=float, default=0.3, help="Weight for regression loss")
-    parser.add_argument("--freeze_blocks", type=int, default=2, help="冻结 backbone 前 N 层")
-    parser.add_argument("--dropout", type=float, default=0.3, help="Dropout rate")
+    parser.add_argument("--freeze_blocks", type=int, default=0, help="冻结 backbone 前 N 层")
+    parser.add_argument("--dropout", type=float, default=0.2, help="Dropout rate")
     parser.add_argument("--label_smoothing", type=float, default=0.1, help="标签平滑系数")
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--device", type=str, default="cuda:7")
+    parser.add_argument("--device", type=str, default="cuda:6")
     args = parser.parse_args()
     main(args)

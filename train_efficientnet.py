@@ -9,7 +9,7 @@ import torch.nn.functional as F  # 导入 functional 模块
 from torch import optim
 import torch
 from torch.utils.data import DataLoader
-from torchvision.models import efficientnet_b0
+from torchvision.models import mobilenet_v3_large
 from torchvision import transforms
 from tqdm import tqdm
 import logging
@@ -106,11 +106,11 @@ class MultiTaskEfficientNetB0(nn.Module):
     def __init__(self, num_venous_classes, num_nipple_classes, num_arrangement_classes, num_base_transparency_classes,
                  pretrained=True, freeze_blocks=0, dropout=0.0):
         super(MultiTaskEfficientNetB0, self).__init__()
-        self.backbone = efficientnet_b0(pretrained=pretrained)
-        in_features = self.backbone.classifier[1].in_features
+        self.backbone = mobilenet_v3_large(pretrained=pretrained)
+        in_features = self.backbone.classifier[0].in_features  # 960
         self.backbone.classifier = nn.Identity()
 
-        # 冻结 backbone 前 freeze_blocks 层
+        # 冻结 backbone 前 freeze_blocks 层 (features 共 ~18 层)
         for i in range(freeze_blocks):
             for param in self.backbone.features[i].parameters():
                 param.requires_grad = False
@@ -344,8 +344,8 @@ if __name__ == '__main__':
     parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/val', help="Path to validation image directory")
     parser.add_argument('--old_val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json', help="Path to old validation annotation file (optional, for concatenation)")
     parser.add_argument('--old_val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val', help="Path to old validation image directory (optional, for concatenation)")
-    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V8/', help="Directory to save models and logs")
-    parser.add_argument('--model_save_name', type=str, default='effiecientnet_classification',
+    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V9/', help="Directory to save models and logs")
+    parser.add_argument('--model_save_name', type=str, default='mobilenet_classification',
                         help="Directory to save models and logs")
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=150)
@@ -355,8 +355,8 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=10, help="Early stopping patience (eval cycles)")
     parser.add_argument('--sigma', type=float, default=0.5, help="Gaussian sigma for ordinal soft labels")
     parser.add_argument('--lambda_reg', type=float, default=0.3, help="Weight for regression loss")
-    parser.add_argument('--freeze_blocks', type=int, default=2, help="冻结 backbone 前 N 层 (0 表示不冻结)")
-    parser.add_argument('--dropout', type=float, default=0.3, help="Dropout rate (0 表示不添加)")
+    parser.add_argument('--freeze_blocks', type=int, default=0, help="冻结 backbone 前 N 层 (0 表示不冻结)")
+    parser.add_argument('--dropout', type=float, default=0.2, help="Dropout rate (0 表示不添加)")
     parser.add_argument('--label_smoothing', type=float, default=0.1, help="标签平滑系数 (0 表示不平滑)")
 
     args = parser.parse_args()
