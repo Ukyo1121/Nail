@@ -16,6 +16,7 @@ import logging
 from datetime import datetime
 import argparse
 import math
+import matplotlib.pyplot as plt
 
 from shape_tubes_dataset import ClassificationDataset, build_classification_datasets
 
@@ -141,6 +142,8 @@ class MultiTaskEfficientNetB0(nn.Module):
 def train_epoch(model, dataloader, loss_criterion, optimizer, device, scaler):
     model.train()
     running_loss = 0.0
+    correct = {'venous': 0, 'nipple': 0, 'arrangement': 0, 'base_transparency': 0}
+    total = {'venous': 0, 'nipple': 0, 'arrangement': 0, 'base_transparency': 0}
     progress_bar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Training")
     for _, (images, labels) in progress_bar:
         images = images.to(device)
@@ -163,10 +166,23 @@ def train_epoch(model, dataloader, loss_criterion, optimizer, device, scaler):
         scaler.update()
 
         running_loss += loss.item()
-        progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
+
+        for name, logits, labels_t in [
+            ('venous', venous_logits, venous_labels),
+            ('nipple', nipple_logits, nipple_labels),
+            ('arrangement', arrangement_logits, arrangement_labels),
+            ('base_transparency', base_transparency_logits, base_transparency_labels),
+        ]:
+            c, n = calculate_correct(logits, labels_t)
+            correct[name] += c
+            total[name] += n
+
+        train_acc = sum(correct[t] / max(total[t], 1) for t in correct) / len(correct)
+        progress_bar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{train_acc:.2f}'})
 
     avg_loss = running_loss / len(dataloader)
-    return avg_loss
+    avg_acc = sum(correct[t] / max(total[t], 1) for t in correct) / len(correct)
+    return avg_loss, avg_acc
 
 
 def evaluate_epoch(model, dataloader, loss_criterion, device):
@@ -234,6 +250,47 @@ def evaluate_epoch(model, dataloader, loss_criterion, device):
     return avg_val_loss, metrics
 
 
+def plot_curves(train_losses, train_accs, val_epochs, val_losses, val_accs, val_task_accs, output_dir):
+    """绘制训练曲线：Loss 和 Accuracy（val 仅每 eval_freq epoch 有数据点）。"""
+    epochs = range(1, len(train_losses) + 1)
+    fig, axes = plt.subplots(1, 3, figsize=(21, 5))
+
+    # --- Loss ---
+    axes[0].plot(epochs, train_losses, label='Train Loss', color='#1f77b4', linewidth=1.5)
+    axes[0].plot(val_epochs, val_losses, 'o-', label='Val Loss', color='#ff7f0e', linewidth=1.5, markersize=4)
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Loss')
+    axes[0].set_title('Loss Curve')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    # --- Avg Accuracy ---
+    axes[1].plot(epochs, train_accs, label='Train Acc (avg)', color='#1f77b4', linewidth=1.5)
+    axes[1].plot(val_epochs, val_accs, 'o-', label='Val Acc (avg)', color='#ff7f0e', linewidth=1.5, markersize=4)
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Accuracy')
+    axes[1].set_title('Average Accuracy')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    # --- Per-task Val Accuracy ---
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+    for i, name in enumerate(['venous', 'nipple', 'arrangement', 'base_transparency']):
+        accs = [d[name] for d in val_task_accs]
+        axes[2].plot(val_epochs, accs, 'o-', label=name, color=colors[i], linewidth=1.5, markersize=4)
+    axes[2].set_xlabel('Epoch')
+    axes[2].set_ylabel('Accuracy')
+    axes[2].set_title('Per-task Val Accuracy')
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    save_path = os.path.join(output_dir, "training_curves.png")
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    logging.info(f"Training curves saved to {save_path}")
+
+
 def main(args):
     os.makedirs(args.output_dir, exist_ok=True)
     log_dir = os.path.join(args.output_dir, "logs")
@@ -295,18 +352,27 @@ def main(args):
     best_val_accuracy = 0.0
     early_stopping = EarlyStopping(patience=args.patience)
 
+    train_losses, train_accs = [], []
+    val_epochs, val_losses, val_accs, val_task_accs = [], [], [], []
+
     logging.info(f"Anti-overfitting: freeze_blocks={args.freeze_blocks} | dropout={args.dropout} | label_smoothing={args.label_smoothing}")
     logging.info("Starting Training...")
     for epoch in range(args.epochs):
-        avg_train_loss = train_epoch(model, train_loader, criterion, optimizer, args.device, scaler)
+        avg_train_loss, avg_train_acc = train_epoch(model, train_loader, criterion, optimizer, args.device, scaler)
         scheduler.step()
-        logging.info(f"Epoch [{epoch + 1}/{args.epochs}] - Training Loss: {avg_train_loss:.4f}")
+        train_losses.append(avg_train_loss)
+        train_accs.append(avg_train_acc)
+        logging.info(f"Epoch [{epoch + 1}/{args.epochs}] - Training Loss: {avg_train_loss:.4f} | Training Acc: {avg_train_acc:.4f}")
 
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
             avg_val_loss, metrics = evaluate_epoch(
                 model, val_loader, criterion, args.device
             )
             total_val_acc = sum(m['acc'] for m in metrics.values()) / len(metrics)
+            val_epochs.append(epoch + 1)
+            val_losses.append(avg_val_loss)
+            val_accs.append(total_val_acc)
+            val_task_accs.append({k: metrics[k]['acc'] for k in metrics})
             logging.info(
                 f"Epoch [{epoch + 1}/{args.epochs}] - Validation Loss: {avg_val_loss:.4f} | "
                 f"Venous: Acc: {metrics['venous']['acc']:.4f} | F1: {metrics['venous']['f1']:.4f} | QWK: {metrics['venous']['qwk']:.4f} | "
@@ -330,6 +396,7 @@ def main(args):
         torch.save(model.state_dict(), last_model_path)
         logging.info(f"Saved model of epoch {epoch + 1} to {last_model_path}")
 
+    plot_curves(train_losses, train_accs, val_epochs, val_losses, val_accs, val_task_accs, args.output_dir)
     logging.info("Finished Training!")
 
 

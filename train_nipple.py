@@ -17,6 +17,7 @@ from tqdm import tqdm
 import logging
 from datetime import datetime
 import argparse
+import matplotlib.pyplot as plt
 
 from shape_tubes_dataset import ClassificationDataset
 
@@ -134,6 +135,34 @@ def evaluate(model, loader, device, use_band=False, sigma=1.0, lambda_reg=0.3, l
     return val_loss / max(len(loader), 1), correct / max(total, 1)
 
 
+def plot_curves(train_losses, val_losses, train_accs, val_accs, output_dir, mode):
+    """绘制训练曲线：Loss 和 Accuracy。"""
+    epochs = range(1, len(train_losses) + 1)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax1.plot(epochs, train_losses, label='Train Loss', color='#1f77b4', linewidth=1.5)
+    ax1.plot(epochs, val_losses, label='Val Loss', color='#ff7f0e', linewidth=1.5)
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.set_title(f'Loss Curve ({mode})')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    ax2.plot(epochs, train_accs, label='Train Acc', color='#1f77b4', linewidth=1.5)
+    ax2.plot(epochs, val_accs, label='Val Acc', color='#ff7f0e', linewidth=1.5)
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Accuracy')
+    ax2.set_title(f'Accuracy Curve ({mode})')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    save_path = os.path.join(output_dir, f"training_curves_{mode}.png")
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    logging.info(f"Training curves saved to {save_path}")
+
+
 def main(args):
     os.makedirs(args.output_dir, exist_ok=True)
     log_file = os.path.join(args.output_dir, f"nipple_{args.mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
@@ -179,6 +208,7 @@ def main(args):
 
     best_val_acc = 0.0
     patience_counter = 0
+    train_losses, val_losses, train_accs, val_accs = [], [], [], []
     logging.info(f"Mode: {args.mode} | Band dir: {args.band_dir or 'N/A'} | Use band: {use_band} | Patience: {args.patience}")
     logging.info(f"Anti-overfitting: freeze_blocks={args.freeze_blocks} | dropout={args.dropout} | label_smoothing={args.label_smoothing}")
 
@@ -187,6 +217,11 @@ def main(args):
         scheduler.step()
 
         val_loss, val_acc = evaluate(model, val_loader, args.device, use_band=use_band, sigma=args.sigma, lambda_reg=args.lambda_reg, label_smoothing=args.label_smoothing)
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accs.append(train_acc)
+        val_accs.append(val_acc)
 
         logging.info(
             f"Epoch [{epoch+1}/{args.epochs}] "
@@ -207,6 +242,7 @@ def main(args):
                 logging.info(f"Early stopping at epoch {epoch+1}")
                 break
 
+    plot_curves(train_losses, val_losses, train_accs, val_accs, args.output_dir, args.mode)
     logging.info(f"Done. Best Val Acc: {best_val_acc:.4f}")
 
 

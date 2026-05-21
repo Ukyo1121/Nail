@@ -11,9 +11,27 @@ from torchvision.models import mobilenet_v3_large
 from torchvision import transforms
 from tqdm import tqdm
 import argparse
+import sys
+import os
+from datetime import datetime
 from sklearn.metrics import cohen_kappa_score
 
 from shape_tubes_dataset import ClassificationDataset
+
+
+class Tee:
+    """同时写入 stdout 和 log 文件。"""
+    def __init__(self, *files):
+        self.files = files
+
+    def write(self, obj):
+        for f in self.files:
+            f.write(obj)
+            f.flush()
+
+    def flush(self):
+        for f in self.files:
+            f.flush()
 
 
 class NippleOnlyModel(nn.Module):
@@ -89,6 +107,23 @@ def evaluate(model, loader, device, use_band=False):
 
 
 def main(args):
+    # --- 日志设置 ---
+    if args.log_file is None:
+        log_dir = os.path.join(os.path.dirname(args.original_model), 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, 'eval_logs.txt')
+    else:
+        log_path = args.log_file
+
+    log_f = open(log_path, 'a')
+    original_stdout = sys.stdout
+    sys.stdout = Tee(sys.stdout, log_f)
+
+    print(f"\n{'='*60}")
+    print(f"Evaluation started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Original model: {args.original_model}")
+    print(f"Band model: {args.band_model}")
+
     val_transform = transforms.Compose([
         transforms.Resize((1024, 1024)),
         transforms.ToTensor(),
@@ -150,15 +185,20 @@ def main(args):
                 row += f"{val:>30.4f}"
             print(row)
 
+    print(f"\nLog saved to {log_path}")
+    sys.stdout = original_stdout
+    log_f.close()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--original_model", type=str, default="./work_dir/models/nipple_test_original/V7/nipple_original_best.pth")
-    parser.add_argument("--band_model", type=str, default="./work_dir/models/nipple_test_band/V7/nipple_band_best.pth")
+    parser.add_argument("--original_model", type=str, default="./work_dir/models/nipple_test_original/V8/nipple_original_best.pth")
+    parser.add_argument("--band_model", type=str, default="./work_dir/models/nipple_test_band/V8/nipple_band_best.pth")
     parser.add_argument("--val_ann", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json")
     parser.add_argument("--val_dir", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val")
     parser.add_argument("--band_dir", type=str, default="/home/suzhiling/efficientnet/bands/v2/val_band", help="band 裁剪目录（val）")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--device", type=str, default="cuda:7")
+    parser.add_argument("--log_file", type=str, default=None, help="Path to save evaluation log (default: <model_dir>/logs/eval_logs.txt)")
     args = parser.parse_args()
     main(args)

@@ -265,7 +265,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Evaluate multi-task EfficientNet-B0")
-    parser.add_argument('--model_path', type=str, default='./work_dir/models/classification/V8/effiecientnet_classification_best.pth', help="Path to trained .pth model")
+    parser.add_argument('--model_path', type=str, default='./work_dir/models/classification/V9/mobilenet_classification_best.pth', help="Path to trained .pth model")
     parser.add_argument('--val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json')
     parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val')
     parser.add_argument('--old_val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/annotations/val_classification.json', help="Path to old validation annotation file (optional, for concatenation)")
