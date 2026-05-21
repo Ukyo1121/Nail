@@ -36,7 +36,7 @@ class EarlyStopping:
         return self.counter >= self.patience  # True = 应该停止
 
 
-def make_ordinal_soft_targets(labels, num_classes, sigma=1.0):
+def make_ordinal_soft_targets(labels, num_classes, sigma=1.0, label_smoothing=0.0):
     """为每个标签生成高斯软标签分布，距离越近权重越大。
     例如标签 0 (4类): [0.607, 0.242, 0.018, 0.000] — 邻近类有梯度，远处几乎为0。
     """
@@ -52,12 +52,14 @@ def make_ordinal_soft_targets(labels, num_classes, sigma=1.0):
     dist_sq = (classes.unsqueeze(0) - safe_labels_float) ** 2   # (B, C)
     soft_targets = torch.exp(-dist_sq / (2 * sigma ** 2))       # (B, C)
     soft_targets = soft_targets / soft_targets.sum(dim=1, keepdim=True)  # 归一化
+    if label_smoothing > 0:
+        soft_targets = (1 - label_smoothing) * soft_targets + label_smoothing / num_classes
     return soft_targets, mask
 
 
-def ordinal_ce_loss(logits, labels, num_classes, sigma=1.0):
+def ordinal_ce_loss(logits, labels, num_classes, sigma=1.0, label_smoothing=0.0):
     """Ordinal-aware cross entropy: 用高斯软标签替代 one-hot，让邻近类的惩罚更小。"""
-    soft_targets, mask = make_ordinal_soft_targets(labels, num_classes, sigma)
+    soft_targets, mask = make_ordinal_soft_targets(labels, num_classes, sigma, label_smoothing)
     log_probs = F.log_softmax(logits, dim=1)  # (B, C)
     per_sample_loss = -(soft_targets * log_probs).sum(dim=1)  # (B,)
     if mask.sum() == 0:
@@ -68,11 +70,11 @@ def ordinal_ce_loss(logits, labels, num_classes, sigma=1.0):
 def loss_function(venous_logits, nipple_logits, arrangement_logits, base_transparency_logits,
                   venous_reg, nipple_reg, arrangement_reg, base_transparency_reg,
                   venous_labels, nipple_labels, arrangement_labels, base_transparency_labels,
-                  lambda_reg=0.1, sigma=0.5):
-    venous_loss = ordinal_ce_loss(venous_logits, venous_labels, num_classes=4, sigma=sigma)
-    nipple_loss = ordinal_ce_loss(nipple_logits, nipple_labels, num_classes=4, sigma=sigma)
-    arrangement_loss = ordinal_ce_loss(arrangement_logits, arrangement_labels, num_classes=4, sigma=sigma)
-    base_transparency_loss = ordinal_ce_loss(base_transparency_logits, base_transparency_labels, num_classes=3, sigma=sigma)
+                  lambda_reg=0.1, sigma=0.5, label_smoothing=0.0):
+    venous_loss = ordinal_ce_loss(venous_logits, venous_labels, num_classes=4, sigma=sigma, label_smoothing=label_smoothing)
+    nipple_loss = ordinal_ce_loss(nipple_logits, nipple_labels, num_classes=4, sigma=sigma, label_smoothing=label_smoothing)
+    arrangement_loss = ordinal_ce_loss(arrangement_logits, arrangement_labels, num_classes=4, sigma=sigma, label_smoothing=label_smoothing)
+    base_transparency_loss = ordinal_ce_loss(base_transparency_logits, base_transparency_labels, num_classes=3, sigma=sigma, label_smoothing=label_smoothing)
 
     reg_criterion = nn.SmoothL1Loss()
 
@@ -101,11 +103,19 @@ def calculate_correct(logits, labels):
 
 
 class MultiTaskEfficientNetB0(nn.Module):
-    def __init__(self, num_venous_classes, num_nipple_classes, num_arrangement_classes, num_base_transparency_classes, pretrained=True):
+    def __init__(self, num_venous_classes, num_nipple_classes, num_arrangement_classes, num_base_transparency_classes,
+                 pretrained=True, freeze_blocks=0, dropout=0.0):
         super(MultiTaskEfficientNetB0, self).__init__()
         self.backbone = efficientnet_b0(pretrained=pretrained)
         in_features = self.backbone.classifier[1].in_features
         self.backbone.classifier = nn.Identity()
+
+        # 冻结 backbone 前 freeze_blocks 层
+        for i in range(freeze_blocks):
+            for param in self.backbone.features[i].parameters():
+                param.requires_grad = False
+
+        self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
 
         # 分类头
         self.venous_fc = nn.Linear(in_features, num_venous_classes)
@@ -121,6 +131,7 @@ class MultiTaskEfficientNetB0(nn.Module):
 
     def forward(self, x):
         feat = self.backbone(x)
+        feat = self.dropout(feat)
         return (self.venous_fc(feat), self.nipple_fc(feat),
                 self.arrangement_fc(feat), self.base_transparency_fc(feat),
                 self.venous_reg(feat), self.nipple_reg(feat),
@@ -272,17 +283,19 @@ def main(args):
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8)
 
     # --- 模型初始化 ---
-    model = MultiTaskEfficientNetB0(4, 4, 4, 3, pretrained=True)
+    model = MultiTaskEfficientNetB0(4, 4, 4, 3, pretrained=True,
+                                    freeze_blocks=args.freeze_blocks, dropout=args.dropout)
     model.to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
     scaler = torch.cuda.amp.GradScaler()
     def criterion(*loss_args):
-        return loss_function(*loss_args, lambda_reg=args.lambda_reg, sigma=args.sigma)
+        return loss_function(*loss_args, lambda_reg=args.lambda_reg, sigma=args.sigma, label_smoothing=args.label_smoothing)
 
     best_val_accuracy = 0.0
     early_stopping = EarlyStopping(patience=args.patience)
 
+    logging.info(f"Anti-overfitting: freeze_blocks={args.freeze_blocks} | dropout={args.dropout} | label_smoothing={args.label_smoothing}")
     logging.info("Starting Training...")
     for epoch in range(args.epochs):
         avg_train_loss = train_epoch(model, train_loader, criterion, optimizer, args.device, scaler)
@@ -325,13 +338,13 @@ if __name__ == '__main__':
 
     parser.add_argument('--train_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/annotations/train_classification.json', help="Path to training annotation file")
     parser.add_argument('--train_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/train', help="Path to training image directory")
-    parser.add_argument('--old_train_ann', type=str, default=None, help="Path to old training annotation file (optional, for concatenation)")
-    parser.add_argument('--old_train_dir', type=str, default=None, help="Path to old training image directory (optional, for concatenation)")
+    parser.add_argument('--old_train_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/train_classification.json', help="Path to old training annotation file (optional, for concatenation)")
+    parser.add_argument('--old_train_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/train', help="Path to old training image directory (optional, for concatenation)")
     parser.add_argument('--val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/annotations/val_classification.json', help="Path to validation annotation file")
     parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/val', help="Path to validation image directory")
-    parser.add_argument('--old_val_ann', type=str, default=None, help="Path to old validation annotation file (optional, for concatenation)")
-    parser.add_argument('--old_val_dir', type=str, default=None, help="Path to old validation image directory (optional, for concatenation)")
-    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V5_512_B/', help="Directory to save models and logs")
+    parser.add_argument('--old_val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json', help="Path to old validation annotation file (optional, for concatenation)")
+    parser.add_argument('--old_val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val', help="Path to old validation image directory (optional, for concatenation)")
+    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V8/', help="Directory to save models and logs")
     parser.add_argument('--model_save_name', type=str, default='effiecientnet_classification',
                         help="Directory to save models and logs")
     parser.add_argument('--batch_size', type=int, default=8)
@@ -342,6 +355,9 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=10, help="Early stopping patience (eval cycles)")
     parser.add_argument('--sigma', type=float, default=0.5, help="Gaussian sigma for ordinal soft labels")
     parser.add_argument('--lambda_reg', type=float, default=0.3, help="Weight for regression loss")
+    parser.add_argument('--freeze_blocks', type=int, default=2, help="冻结 backbone 前 N 层 (0 表示不冻结)")
+    parser.add_argument('--dropout', type=float, default=0.3, help="Dropout rate (0 表示不添加)")
+    parser.add_argument('--label_smoothing', type=float, default=0.1, help="标签平滑系数 (0 表示不平滑)")
 
     args = parser.parse_args()
     main(args)

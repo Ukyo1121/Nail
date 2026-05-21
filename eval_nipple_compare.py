@@ -16,16 +16,18 @@ from shape_tubes_dataset import ClassificationDataset
 
 
 class NippleOnlyModel(nn.Module):
-    def __init__(self, num_classes, pretrained=True):
+    def __init__(self, num_classes, pretrained=True, dropout=0.0):
         super().__init__()
         self.backbone = efficientnet_b0(pretrained=pretrained)
         in_features = self.backbone.classifier[1].in_features
         self.backbone.classifier = nn.Identity()
+        self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
         self.fc = nn.Linear(in_features, num_classes)
         self.reg = nn.Linear(in_features, 1)
 
     def forward(self, x):
         feat = self.backbone(x)
+        feat = self.dropout(feat)
         return self.fc(feat), self.reg(feat)
 
 
@@ -150,12 +152,12 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--original_model", type=str, default="./work_dir/models/nipple_test_original/V5/nipple_original_best.pth")
-    parser.add_argument("--band_model", type=str, default="./work_dir/models/nipple_test_band/V6/nipple_band_best.pth")
+    parser.add_argument("--original_model", type=str, default="./work_dir/models/nipple_test_original/V7/nipple_original_best.pth")
+    parser.add_argument("--band_model", type=str, default="./work_dir/models/nipple_test_band/V7/nipple_band_best.pth")
     parser.add_argument("--val_ann", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json")
     parser.add_argument("--val_dir", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val")
-    parser.add_argument("--band_dir", type=str, default="/home/suzhiling/efficientnet/bands_v2/val_band", help="band 裁剪目录（val）")
+    parser.add_argument("--band_dir", type=str, default="/home/suzhiling/efficientnet/bands/v2/val_band", help="band 裁剪目录（val）")
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--device", type=str, default="cuda:7")
     args = parser.parse_args()
     main(args)

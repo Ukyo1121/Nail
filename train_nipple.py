@@ -23,20 +23,28 @@ from shape_tubes_dataset import ClassificationDataset
 
 class NippleOnlyModel(nn.Module):
     """只保留 nipple 分类头（分类 + 回归）的模型。"""
-    def __init__(self, num_classes, pretrained=True):
+    def __init__(self, num_classes, pretrained=True, freeze_blocks=0, dropout=0.0):
         super().__init__()
         self.backbone = efficientnet_b0(pretrained=pretrained)
         in_features = self.backbone.classifier[1].in_features
         self.backbone.classifier = nn.Identity()
+
+        # 冻结 backbone 前 freeze_blocks 层
+        for i in range(freeze_blocks):
+            for param in self.backbone.features[i].parameters():
+                param.requires_grad = False
+
+        self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
         self.fc = nn.Linear(in_features, num_classes)
         self.reg = nn.Linear(in_features, 1)
 
     def forward(self, x):
         feat = self.backbone(x)
+        feat = self.dropout(feat)
         return self.fc(feat), self.reg(feat)
 
 
-def make_ordinal_soft_targets(labels, num_classes, sigma=1.0):
+def make_ordinal_soft_targets(labels, num_classes, sigma=1.0, label_smoothing=0.0):
     """为每个标签生成高斯软标签分布，距离越近权重越大。"""
     device = labels.device
     mask = labels != -1
@@ -48,12 +56,14 @@ def make_ordinal_soft_targets(labels, num_classes, sigma=1.0):
     dist_sq = (classes.unsqueeze(0) - safe_labels_float) ** 2
     soft_targets = torch.exp(-dist_sq / (2 * sigma ** 2))
     soft_targets = soft_targets / soft_targets.sum(dim=1, keepdim=True)
+    if label_smoothing > 0:
+        soft_targets = (1 - label_smoothing) * soft_targets + label_smoothing / num_classes
     return soft_targets, mask
 
 
-def ordinal_ce_loss(logits, labels, num_classes, sigma=1.0):
+def ordinal_ce_loss(logits, labels, num_classes, sigma=1.0, label_smoothing=0.0):
     """Ordinal-aware cross entropy: 用高斯软标签替代 one-hot，让邻近类的惩罚更小。"""
-    soft_targets, mask = make_ordinal_soft_targets(labels, num_classes, sigma)
+    soft_targets, mask = make_ordinal_soft_targets(labels, num_classes, sigma, label_smoothing)
     log_probs = F.log_softmax(logits, dim=1)
     per_sample_loss = -(soft_targets * log_probs).sum(dim=1)
     if mask.sum() == 0:
@@ -61,7 +71,7 @@ def ordinal_ce_loss(logits, labels, num_classes, sigma=1.0):
     return per_sample_loss[mask].mean()
 
 
-def train_one_epoch(model, loader, optimizer, device, use_band=False, sigma=1.0, lambda_reg=0.3):
+def train_one_epoch(model, loader, optimizer, device, use_band=False, sigma=1.0, lambda_reg=0.3, label_smoothing=0.0):
     model.train()
     reg_fn = nn.SmoothL1Loss()
     running_loss = 0.0
@@ -79,7 +89,7 @@ def train_one_epoch(model, loader, optimizer, device, use_band=False, sigma=1.0,
         optimizer.zero_grad()
         logits, reg_pred = model(input_img)
 
-        loss_ce = ordinal_ce_loss(logits[valid], nipple_labels[valid], num_classes=4, sigma=sigma)
+        loss_ce = ordinal_ce_loss(logits[valid], nipple_labels[valid], num_classes=4, sigma=sigma, label_smoothing=label_smoothing)
         reg_targets = nipple_labels[valid].float() / 3.0
         loss_reg = reg_fn(reg_pred[valid].squeeze(-1), reg_targets)
         loss = loss_ce + lambda_reg * loss_reg
@@ -96,7 +106,7 @@ def train_one_epoch(model, loader, optimizer, device, use_band=False, sigma=1.0,
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, use_band=False, sigma=1.0, lambda_reg=0.3):
+def evaluate(model, loader, device, use_band=False, sigma=1.0, lambda_reg=0.3, label_smoothing=0.0):
     model.eval()
     reg_fn = nn.SmoothL1Loss()
     val_loss = 0.0
@@ -112,7 +122,7 @@ def evaluate(model, loader, device, use_band=False, sigma=1.0, lambda_reg=0.3):
         input_img = band_images.to(device) if use_band else images.to(device)
         logits, reg_pred = model(input_img)
 
-        loss_ce = ordinal_ce_loss(logits[valid], nipple_labels[valid], num_classes=4, sigma=sigma)
+        loss_ce = ordinal_ce_loss(logits[valid], nipple_labels[valid], num_classes=4, sigma=sigma, label_smoothing=label_smoothing)
         reg_targets = nipple_labels[valid].float() / 3.0
         loss_reg = reg_fn(reg_pred[valid].squeeze(-1), reg_targets)
         val_loss += (loss_ce + lambda_reg * loss_reg).item()
@@ -163,19 +173,20 @@ def main(args):
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8)
 
-    model = NippleOnlyModel(num_classes=4, pretrained=True).to(args.device)
+    model = NippleOnlyModel(num_classes=4, pretrained=True, freeze_blocks=args.freeze_blocks, dropout=args.dropout).to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
 
     best_val_acc = 0.0
     patience_counter = 0
     logging.info(f"Mode: {args.mode} | Band dir: {args.band_dir or 'N/A'} | Use band: {use_band} | Patience: {args.patience}")
+    logging.info(f"Anti-overfitting: freeze_blocks={args.freeze_blocks} | dropout={args.dropout} | label_smoothing={args.label_smoothing}")
 
     for epoch in range(args.epochs):
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, args.device, use_band=use_band, sigma=args.sigma, lambda_reg=args.lambda_reg)
+        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, args.device, use_band=use_band, sigma=args.sigma, lambda_reg=args.lambda_reg, label_smoothing=args.label_smoothing)
         scheduler.step()
 
-        val_loss, val_acc = evaluate(model, val_loader, args.device, use_band=use_band, sigma=args.sigma, lambda_reg=args.lambda_reg)
+        val_loss, val_acc = evaluate(model, val_loader, args.device, use_band=use_band, sigma=args.sigma, lambda_reg=args.lambda_reg, label_smoothing=args.label_smoothing)
 
         logging.info(
             f"Epoch [{epoch+1}/{args.epochs}] "
@@ -207,13 +218,16 @@ if __name__ == "__main__":
     parser.add_argument("--train_dir", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/train")
     parser.add_argument("--val_ann", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json")
     parser.add_argument("--val_dir", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val")
-    parser.add_argument("--band_dir", type=str, default="/home/suzhiling/efficientnet/bands_v2", help="band 裁剪根目录，下含 train/ val/")
-    parser.add_argument("--output_dir", type=str, default="./work_dir/models/nipple_test_band/V6")
+    parser.add_argument("--band_dir", type=str, default="/home/suzhiling/efficientnet/bands/v2", help="band 裁剪根目录，下含 train/ val/")
+    parser.add_argument("--output_dir", type=str, default="./work_dir/models/nipple_test_band/V7")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=30, help="早停耐心值，连续无改善则停止")
     parser.add_argument("--sigma", type=float, default=0.5, help="Gaussian sigma for ordinal soft labels")
     parser.add_argument("--lambda_reg", type=float, default=0.3, help="Weight for regression loss")
+    parser.add_argument("--freeze_blocks", type=int, default=2, help="冻结 backbone 前 N 层")
+    parser.add_argument("--dropout", type=float, default=0.3, help="Dropout rate")
+    parser.add_argument("--label_smoothing", type=float, default=0.1, help="标签平滑系数")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--device", type=str, default="cuda:7")
     args = parser.parse_args()

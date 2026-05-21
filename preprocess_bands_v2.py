@@ -52,7 +52,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_dir", type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val', help="原始图像目录")
     parser.add_argument("--mask_dir", type=str, default='/home/suzhiling/mask_rcnn_v2/work_dir/v2/0520/predication_v2_val/masks', help="血管 mask .npy 文件目录")
-    parser.add_argument("--output_dir", type=str, default='/home/suzhiling/efficientnet/bands_v2/val_band', help="band 裁剪输出目录")
+    parser.add_argument("--output_dir", type=str, default='/home/suzhiling/efficientnet/bands/v2/val_band', help="band 裁剪输出目录")
     parser.add_argument("--top_offset", type=int, default=200, help="裁剪顶部向上扩展的像素数")
     parser.add_argument("--bottom_offset", type=int, default=200, help="裁剪底部向下扩展的像素数")
     args = parser.parse_args()
