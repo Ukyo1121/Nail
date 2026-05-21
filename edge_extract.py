@@ -1,4 +1,5 @@
 import os
+import glob
 import cv2
 import numpy as np
 
@@ -378,6 +379,99 @@ def extract_and_save_band(image_path, save_path, band_width=120):
     y_max = max(lower_ys)
 
     crop = image_rgb[y_min:y_max + 1, 0:w]
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    cv2.imwrite(save_path, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+    return crop
+
+
+def find_vessel_highest_points(mask):
+    """
+    找到二值 mask 中血管的最高点（y 坐标最小值）。
+    返回 y 坐标，若 mask 为空则返回 None。
+    """
+    ys = np.where(mask > 0)[0]
+    if len(ys) == 0:
+        return None
+    return int(ys.min())
+
+
+def extract_band_from_masks(image_rgb, masks, top_offset=200, bottom_offset=50):
+    """
+    基于血管 mask 最高点提取带状区域。
+
+    逻辑：
+    - 找出每个血管 mask 的最高点（y 坐标最小处）
+    - 裁剪区域顶部 = 所有最高点的最小值 - top_offset（最靠上的管尖再往上 top_offset 像素）
+    - 裁剪区域底部 = 所有最高点的最大值 + bottom_offset（最靠下的管尖再往下 bottom_offset 像素）
+
+    Args:
+        image_rgb: RGB 图像 (H, W, 3)
+        masks: 二值 mask 列表，每个为 (H, W) 的 numpy array
+        top_offset: 顶部向上扩展的像素数
+        bottom_offset: 底部向下扩展的像素数
+
+    Returns:
+        cropped image (RGB)
+    """
+    h, w = image_rgb.shape[:2]
+
+    highest_points = []
+    for mask in masks:
+        if mask.shape[:2] != (h, w):
+            mask = cv2.resize(
+                mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST
+            )
+        hp = find_vessel_highest_points(mask)
+        if hp is not None:
+            highest_points.append(hp)
+
+    if not highest_points:
+        return image_rgb
+
+    y_top = min(highest_points) - top_offset
+    y_bottom = max(highest_points) + bottom_offset
+
+    y_top = max(0, y_top)
+    y_bottom = min(h - 1, y_bottom)
+
+    if y_top >= y_bottom:
+        y_top = 0
+
+    crop = image_rgb[y_top:y_bottom + 1, 0:w]
+    return crop
+
+
+def extract_and_save_band_from_masks(image_path, save_path, mask_dir, top_offset=100, bottom_offset=0):
+    """
+    读取图像及对应的 mask 文件，基于 mask 最高点提取 band 并保存。
+
+    mask 文件命名格式: {file_name}_mask_*.npy
+
+    Args:
+        image_path: 原始图像路径
+        save_path: 裁剪结果保存路径
+        mask_dir: mask .npy 文件所在目录
+        top_offset: 顶部向上扩展的像素数
+        bottom_offset: 底部向下扩展的像素数
+    """
+    image_bgr = cv2.imread(image_path)
+    if image_bgr is None:
+        raise FileNotFoundError(image_path)
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_RGB2BGR)
+
+    basename = os.path.splitext(os.path.basename(image_path))[0]
+    mask_pattern = f"{basename}_mask_*.npy"
+    mask_files = sorted(glob.glob(os.path.join(mask_dir, mask_pattern)))
+
+    if not mask_files:
+        print(f"  未找到 mask: {basename}，保存全图")
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        cv2.imwrite(save_path, image_bgr)
+        return image_rgb
+
+    masks = [np.load(mf) for mf in mask_files]
+    crop = extract_band_from_masks(image_rgb, masks, top_offset=top_offset, bottom_offset=bottom_offset)
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     cv2.imwrite(save_path, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))

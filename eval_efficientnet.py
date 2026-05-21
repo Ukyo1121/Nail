@@ -1,4 +1,5 @@
 import os
+import sys
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -8,8 +9,8 @@ import cv2
 import numpy as np
 from PIL import Image
 from sklearn.metrics import f1_score, cohen_kappa_score
-
-from shape_tubes_dataset import ClassificationDataset
+from datetime import datetime
+from shape_tubes_dataset import ClassificationDataset, build_classification_datasets
 from train_efficientnet import MultiTaskEfficientNetB0, loss_function, calculate_correct
 
 
@@ -18,6 +19,7 @@ def evaluate(model, dataloader, device):
 
     task_names = ['venous', 'nipple', 'arrangement', 'base_transparency']
     task_correct = {t: 0 for t in task_names}
+    task_offset_correct = {t: 0 for t in task_names}
     task_total = {t: 0 for t in task_names}
     task_tp = {t: {} for t in task_names}
     task_fn = {t: {} for t in task_names}
@@ -42,7 +44,10 @@ def evaluate(model, dataloader, device):
             ]:
                 _, preds = torch.max(logits, 1)
                 mask = label_t != -1
-                task_correct[name] += (preds[mask] == label_t[mask]).sum().item()
+                correct = preds[mask] == label_t[mask]
+                task_correct[name] += correct.sum().item()
+                offset_correct = (preds[mask] - label_t[mask]).abs() <= 1
+                task_offset_correct[name] += offset_correct.sum().item()
                 task_total[name] += mask.sum().item()
 
                 all_preds[name].append(preds[mask].cpu().numpy())
@@ -80,9 +85,11 @@ def evaluate(model, dataloader, device):
             macro_f1 = 0.0
             qwk = 0.0
 
-        print(f"  {name:>20s}  Acc: {acc:.4f} | F1: {macro_f1:.4f} | QWK: {qwk:.4f}  ({task_correct[name]}/{task_total[name]})  Recall(macro): {macro_recall:.4f}  [{', '.join(recall_strs)}]")
+        offset_acc = task_offset_correct[name] / task_total[name] if task_total[name] > 0 else 0.0
+        print(f"  {name:>20s}  Acc: {acc:.4f} | Off1: {offset_acc:.4f} | F1: {macro_f1:.4f} | QWK: {qwk:.4f}  ({task_correct[name]}/{task_total[name]})  Recall(macro): {macro_recall:.4f}  [{', '.join(recall_strs)}]")
 
     avg_acc = sum(task_correct[t] / task_total[t] if task_total[t] > 0 else 0.0 for t in task_names) / len(task_names)
+    avg_offset = sum(task_offset_correct[t] / task_total[t] if task_total[t] > 0 else 0.0 for t in task_names) / len(task_names)
     avg_recall = 0.0
     avg_f1 = 0.0
     avg_qwk = 0.0
@@ -104,7 +111,20 @@ def evaluate(model, dataloader, device):
     avg_recall /= len(task_names)
     avg_f1 /= len(task_names)
     avg_qwk /= len(task_names)
-    print(f"  {'Average':>20s}  Acc: {avg_acc:.4f} | F1: {avg_f1:.4f} | QWK: {avg_qwk:.4f}  Recall(macro): {avg_recall:.4f}")
+    print(f"  {'Average':>20s}  Acc: {avg_acc:.4f} | Off1: {avg_offset:.4f} | F1: {avg_f1:.4f} | QWK: {avg_qwk:.4f}  Recall(macro): {avg_recall:.4f}")
+
+
+def _resolve_dataset(dataset, idx):
+    """解析 ConcatDataset 或普通 Dataset，返回 (ClassificationDataset, 内部索引)。"""
+    from torch.utils.data import ConcatDataset
+    if isinstance(dataset, ConcatDataset):
+        offset = 0
+        for ds in dataset.datasets:
+            if idx < offset + len(ds):
+                return ds, idx - offset
+            offset += len(ds)
+        raise IndexError(f"Index {idx} out of range")
+    return dataset, idx
 
 
 def visualize(model, dataset, device, vis_dir, max_samples=50):
@@ -125,21 +145,22 @@ def visualize(model, dataset, device, vis_dir, max_samples=50):
         if count >= max_samples:
             break
 
-        # 从 dataset 的 coco 中获取图像路径
-        image_id = dataset.image_ids[idx]
-        img_info = dataset.coco.loadImgs(image_id)[0]
-        img_path = os.path.join(dataset.root, img_info['file_name'])
+        ds, inner_idx = _resolve_dataset(dataset, idx)
+
+        image_id = ds.image_ids[inner_idx]
+        img_info = ds.coco.loadImgs(image_id)[0]
+        img_path = os.path.join(ds.root, img_info['file_name'])
         img = cv2.imread(img_path)
         if img is None:
             continue
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         # 获取 GT 标签
-        ann_ids = dataset.coco.getAnnIds(imgIds=image_id)
-        annotations = dataset.coco.loadAnns(ann_ids)
+        ann_ids = ds.coco.getAnnIds(imgIds=image_id)
+        annotations = ds.coco.loadAnns(ann_ids)
         gt = {'venous': -1, 'nipple': -1, 'arrangement': -1, 'base_transparency': -1}
         for ann in annotations:
-            attr_name = dataset.cat_id_to_attr.get(ann['category_id'])
+            attr_name = ds.cat_id_to_attr.get(ann['category_id'])
             if attr_name and attr_name in gt:
                 gt[attr_name] = int(ann['attributes'][attr_name])
 
@@ -184,6 +205,21 @@ def visualize(model, dataset, device, vis_dir, max_samples=50):
     print(f"\nVisualization saved to {vis_dir} ({count} images)")
 
 
+class Tee:
+    """同时写入 stdout 和 log 文件。"""
+    def __init__(self, *files):
+        self.files = files
+
+    def write(self, obj):
+        for f in self.files:
+            f.write(obj)
+            f.flush()
+
+    def flush(self):
+        for f in self.files:
+            f.flush()
+
+
 def main(args):
     val_transform = transforms.Compose([
         transforms.Resize((512, 512)),
@@ -191,10 +227,12 @@ def main(args):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    val_dataset = ClassificationDataset(
-        annotation=args.val_ann,
-        root=args.val_dir,
-        transform=val_transform
+    val_dataset, _ = build_classification_datasets(
+        train_ann=args.val_ann,
+        train_dir=args.val_dir,
+        transform=val_transform,
+        old_train_ann=args.old_val_ann,
+        old_train_dir=args.old_val_dir,
     )
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8)
 
@@ -202,22 +240,41 @@ def main(args):
     model.load_state_dict(torch.load(args.model_path, map_location=args.device))
     model.to(args.device)
 
+    if args.log_file is None:
+        log_dir = os.path.join(os.path.dirname(args.model_path), 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, 'eval_logs.txt')
+    else:
+        log_path = args.log_file
+
+    log_f = open(log_path, 'a')
+    original_stdout = sys.stdout
+    sys.stdout = Tee(sys.stdout, log_f)
+
+    print(f"\n{'='*60}")
+    print(f"Evaluation started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Loaded model from {args.model_path}")
     evaluate(model, val_loader, args.device)
 
     if args.vis_dir:
         visualize(model, val_dataset, args.device, args.vis_dir, max_samples=args.vis_max)
 
+    sys.stdout = original_stdout
+    log_f.close()
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Evaluate multi-task EfficientNet-B0")
-    parser.add_argument('--model_path', type=str, default='./work_dir/models/classification/V4/effiecientnet_classification_best.pth', help="Path to trained .pth model")
+    parser.add_argument('--model_path', type=str, default='./work_dir/models/classification/V5_512_B/effiecientnet_classification_best.pth', help="Path to trained .pth model")
     parser.add_argument('--val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json')
     parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val')
+    parser.add_argument('--old_val_ann', type=str, default=None, help="Path to old validation annotation file (optional, for concatenation)")
+    parser.add_argument('--old_val_dir', type=str, default=None, help="Path to old validation image directory (optional, for concatenation)")
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--vis_dir', type=str, default= None, help="Directory to save visualization results")
     parser.add_argument('--vis_max', type=int, default=500, help="Max number of images to visualize")
+    parser.add_argument('--log_file', type=str, default=None, help="Path to save evaluation log (default: <model_dir>/logs/eval_logs.txt)")
 
     args = parser.parse_args()
     main(args)

@@ -217,6 +217,29 @@ class DetectionDataset(Dataset):
         return image, targets
 
 
+def build_classification_datasets(train_ann, train_dir, transform,
+                                   old_train_ann=None, old_train_dir=None,
+                                   val_ann=None, val_dir=None,
+                                   old_val_ann=None, old_val_dir=None):
+    """构建训练集和验证集，支持新旧数据集拼接。
+
+    模式一：只传入新数据集路径，返回单个数据集。
+    模式二：同时传入新旧数据集路径，返回 ConcatDataset 拼接结果。
+    """
+    from torch.utils.data import ConcatDataset
+
+    def _make_dataset(ann, root, old_ann=None, old_root=None):
+        ds = ClassificationDataset(annotation=ann, root=root, transform=transform)
+        if old_ann is not None and old_root is not None:
+            old_ds = ClassificationDataset(annotation=old_ann, root=old_root, transform=transform)
+            return ConcatDataset([old_ds, ds])
+        return ds
+
+    train_dataset = _make_dataset(train_ann, train_dir, old_train_ann, old_train_dir)
+    val_dataset = _make_dataset(val_ann, val_dir, old_val_ann, old_val_dir) if val_ann is not None else None
+    return train_dataset, val_dataset
+
+
 class ClassificationDataset(Dataset):
     def __init__(self, annotation, root, transform=None, band_dir=None):
         """
@@ -225,6 +248,7 @@ class ClassificationDataset(Dataset):
             root (string): 图像文件夹路径.
             transform (callable, optional): 应用于图像的 transforms.
             band_dir (string, optional): band 裁剪图像目录，设了则返回 (image, band_image, targets).
+            band_size (int): band 图像 resize 的目标正方形边长，默认 1024.
         """
         self.annotation = annotation
         self.root = root
@@ -233,7 +257,7 @@ class ClassificationDataset(Dataset):
         self.image_ids = list(self.coco.imgs.keys())
         if transform is None:
             self.transform = transforms.Compose([
-                transforms.Resize((512, 512)),
+                transforms.Resize((1024, 1024)),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
@@ -242,7 +266,7 @@ class ClassificationDataset(Dataset):
 
         if band_dir is not None:
             self.band_transform = transforms.Compose([
-                transforms.Resize((1024, 1024)),
+                transforms.Resize((278, 1024), antialias=True),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])

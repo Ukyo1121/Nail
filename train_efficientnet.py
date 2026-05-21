@@ -17,7 +17,7 @@ from datetime import datetime
 import argparse
 import math
 
-from shape_tubes_dataset import ClassificationDataset
+from shape_tubes_dataset import ClassificationDataset, build_classification_datasets
 
 
 class EarlyStopping:
@@ -256,15 +256,16 @@ def main(args):
     ])
 
     # --- Dataset ---
-    train_dataset = ClassificationDataset(
-        annotation=args.train_ann,
-        root=args.train_dir,
-        transform=train_transform
-    )
-    val_dataset = ClassificationDataset(
-        annotation=args.val_ann,
-        root=args.val_dir,
-        transform=val_transform
+    train_dataset, val_dataset = build_classification_datasets(
+        train_ann=args.train_ann,
+        train_dir=args.train_dir,
+        transform=train_transform,
+        old_train_ann=args.old_train_ann,
+        old_train_dir=args.old_train_dir,
+        val_ann=args.val_ann,
+        val_dir=args.val_dir,
+        old_val_ann=args.old_val_ann,
+        old_val_dir=args.old_val_dir,
     )
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8)
@@ -322,11 +323,15 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Multi-task classification training with EfficientNet-B0")
 
-    parser.add_argument('--train_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/train_classification.json', help="Path to training annotation file")
-    parser.add_argument('--train_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/train', help="Path to training image directory")
-    parser.add_argument('--val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json', help="Path to validation annotation file")
-    parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val', help="Path to validation image directory")
-    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V5_224/', help="Directory to save models and logs")
+    parser.add_argument('--train_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/annotations/train_classification.json', help="Path to training annotation file")
+    parser.add_argument('--train_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/train', help="Path to training image directory")
+    parser.add_argument('--old_train_ann', type=str, default=None, help="Path to old training annotation file (optional, for concatenation)")
+    parser.add_argument('--old_train_dir', type=str, default=None, help="Path to old training image directory (optional, for concatenation)")
+    parser.add_argument('--val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/annotations/val_classification.json', help="Path to validation annotation file")
+    parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/val', help="Path to validation image directory")
+    parser.add_argument('--old_val_ann', type=str, default=None, help="Path to old validation annotation file (optional, for concatenation)")
+    parser.add_argument('--old_val_dir', type=str, default=None, help="Path to old validation image directory (optional, for concatenation)")
+    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V5_512_B/', help="Directory to save models and logs")
     parser.add_argument('--model_save_name', type=str, default='effiecientnet_classification',
                         help="Directory to save models and logs")
     parser.add_argument('--batch_size', type=int, default=8)

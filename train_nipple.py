@@ -8,6 +8,7 @@
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import optim
 from torch.utils.data import DataLoader
 from torchvision.models import efficientnet_b0
@@ -35,9 +36,33 @@ class NippleOnlyModel(nn.Module):
         return self.fc(feat), self.reg(feat)
 
 
-def train_one_epoch(model, loader, optimizer, device, use_band=False):
+def make_ordinal_soft_targets(labels, num_classes, sigma=1.0):
+    """为每个标签生成高斯软标签分布，距离越近权重越大。"""
+    device = labels.device
+    mask = labels != -1
+    safe_labels = labels.clone()
+    safe_labels[~mask] = 0
+
+    classes = torch.arange(num_classes, device=device).float()
+    safe_labels_float = safe_labels.float().unsqueeze(1)
+    dist_sq = (classes.unsqueeze(0) - safe_labels_float) ** 2
+    soft_targets = torch.exp(-dist_sq / (2 * sigma ** 2))
+    soft_targets = soft_targets / soft_targets.sum(dim=1, keepdim=True)
+    return soft_targets, mask
+
+
+def ordinal_ce_loss(logits, labels, num_classes, sigma=1.0):
+    """Ordinal-aware cross entropy: 用高斯软标签替代 one-hot，让邻近类的惩罚更小。"""
+    soft_targets, mask = make_ordinal_soft_targets(labels, num_classes, sigma)
+    log_probs = F.log_softmax(logits, dim=1)
+    per_sample_loss = -(soft_targets * log_probs).sum(dim=1)
+    if mask.sum() == 0:
+        return per_sample_loss.sum() * 0.0
+    return per_sample_loss[mask].mean()
+
+
+def train_one_epoch(model, loader, optimizer, device, use_band=False, sigma=1.0, lambda_reg=0.3):
     model.train()
-    ce_fn = nn.CrossEntropyLoss(ignore_index=-1)
     reg_fn = nn.SmoothL1Loss()
     running_loss = 0.0
     correct = 0
@@ -54,9 +79,10 @@ def train_one_epoch(model, loader, optimizer, device, use_band=False):
         optimizer.zero_grad()
         logits, reg_pred = model(input_img)
 
-        loss_ce = ce_fn(logits[valid], nipple_labels[valid])
-        loss_reg = reg_fn(reg_pred[valid], nipple_labels[valid].float().unsqueeze(1))
-        loss = loss_ce + 0.3 * loss_reg
+        loss_ce = ordinal_ce_loss(logits[valid], nipple_labels[valid], num_classes=4, sigma=sigma)
+        reg_targets = nipple_labels[valid].float() / 3.0
+        loss_reg = reg_fn(reg_pred[valid].squeeze(-1), reg_targets)
+        loss = loss_ce + lambda_reg * loss_reg
 
         loss.backward()
         optimizer.step()
@@ -70,9 +96,8 @@ def train_one_epoch(model, loader, optimizer, device, use_band=False):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, use_band=False):
+def evaluate(model, loader, device, use_band=False, sigma=1.0, lambda_reg=0.3):
     model.eval()
-    ce_fn = nn.CrossEntropyLoss(ignore_index=-1)
     reg_fn = nn.SmoothL1Loss()
     val_loss = 0.0
     correct = 0
@@ -87,9 +112,10 @@ def evaluate(model, loader, device, use_band=False):
         input_img = band_images.to(device) if use_band else images.to(device)
         logits, reg_pred = model(input_img)
 
-        loss_ce = ce_fn(logits[valid], nipple_labels[valid])
-        loss_reg = reg_fn(reg_pred[valid], nipple_labels[valid].float().unsqueeze(1))
-        val_loss += (loss_ce + 0.3 * loss_reg).item()
+        loss_ce = ordinal_ce_loss(logits[valid], nipple_labels[valid], num_classes=4, sigma=sigma)
+        reg_targets = nipple_labels[valid].float() / 3.0
+        loss_reg = reg_fn(reg_pred[valid].squeeze(-1), reg_targets)
+        val_loss += (loss_ce + lambda_reg * loss_reg).item()
 
         preds = logits[valid].argmax(dim=1)
         correct += (preds == nipple_labels[valid]).sum().item()
@@ -127,28 +153,29 @@ def main(args):
 
     train_dataset = ClassificationDataset(
         annotation=args.train_ann, root=args.train_dir,
-        transform=train_transform, band_dir=train_band
+        transform=train_transform, band_dir=train_band,
     )
     val_dataset = ClassificationDataset(
         annotation=args.val_ann, root=args.val_dir,
-        transform=val_transform, band_dir=val_band
+        transform=val_transform, band_dir=val_band,
     )
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8)
 
     model = NippleOnlyModel(num_classes=4, pretrained=True).to(args.device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
 
     best_val_acc = 0.0
-    logging.info(f"Mode: {args.mode} | Band dir: {args.band_dir or 'N/A'} | Use band: {use_band}")
+    patience_counter = 0
+    logging.info(f"Mode: {args.mode} | Band dir: {args.band_dir or 'N/A'} | Use band: {use_band} | Patience: {args.patience}")
 
     for epoch in range(args.epochs):
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, args.device, use_band=use_band)
+        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, args.device, use_band=use_band, sigma=args.sigma, lambda_reg=args.lambda_reg)
         scheduler.step()
 
-        val_loss, val_acc = evaluate(model, val_loader, args.device, use_band=use_band)
+        val_loss, val_acc = evaluate(model, val_loader, args.device, use_band=use_band, sigma=args.sigma, lambda_reg=args.lambda_reg)
 
         logging.info(
             f"Epoch [{epoch+1}/{args.epochs}] "
@@ -158,9 +185,16 @@ def main(args):
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
+            patience_counter = 0
             save_path = os.path.join(args.output_dir, f"nipple_{args.mode}_best.pth")
             torch.save(model.state_dict(), save_path)
             logging.info(f"Best Val Acc: {best_val_acc:.4f} -> saved {save_path}")
+        else:
+            patience_counter += 1
+            logging.info(f"No improvement for {patience_counter}/{args.patience} epochs")
+            if patience_counter >= args.patience:
+                logging.info(f"Early stopping at epoch {epoch+1}")
+                break
 
     logging.info(f"Done. Best Val Acc: {best_val_acc:.4f}")
 
@@ -173,11 +207,14 @@ if __name__ == "__main__":
     parser.add_argument("--train_dir", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/train")
     parser.add_argument("--val_ann", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json")
     parser.add_argument("--val_dir", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val")
-    parser.add_argument("--band_dir", type=str, default="/home/suzhiling/efficientnet/bands", help="band 裁剪根目录，下含 train/ val/")
-    parser.add_argument("--output_dir", type=str, default="./work_dir/models/nipple_test_original")
+    parser.add_argument("--band_dir", type=str, default="/home/suzhiling/efficientnet/bands_v2", help="band 裁剪根目录，下含 train/ val/")
+    parser.add_argument("--output_dir", type=str, default="./work_dir/models/nipple_test_band/V6")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--patience", type=int, default=30, help="早停耐心值，连续无改善则停止")
+    parser.add_argument("--sigma", type=float, default=0.5, help="Gaussian sigma for ordinal soft labels")
+    parser.add_argument("--lambda_reg", type=float, default=0.3, help="Weight for regression loss")
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--device", type=str, default="cuda:7")
     args = parser.parse_args()
     main(args)

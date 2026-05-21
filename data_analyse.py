@@ -3,8 +3,8 @@ from shape_tubes_dataset import ClassificationDataset
 from torchvision import transforms
 
 dataset = ClassificationDataset(
-    annotation='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/train_classification.json',
-    root='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/train',
+    annotation='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/annotations/train_classification.json',
+    root='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/train',
     transform=transforms.ToTensor()
   )
 counts = {'venous': Counter(), 'nipple': Counter(), 'arrangement': Counter(), 'base_transparency': Counter()}
