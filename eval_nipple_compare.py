@@ -7,7 +7,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torchvision.models import mobilenet_v3_large
+from torchvision.models import mobilenet_v3_small
 from torchvision import transforms
 from tqdm import tqdm
 import argparse
@@ -37,8 +37,8 @@ class Tee:
 class NippleOnlyModel(nn.Module):
     def __init__(self, num_classes, pretrained=True, dropout=0.0):
         super().__init__()
-        self.backbone = mobilenet_v3_large(pretrained=pretrained)
-        in_features = self.backbone.classifier[0].in_features
+        self.backbone = mobilenet_v3_small(pretrained=pretrained)
+        in_features = self.backbone.classifier[0].in_features  # 576
         self.backbone.classifier = nn.Identity()
         self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
         self.fc = nn.Linear(in_features, num_classes)
@@ -192,8 +192,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--original_model", type=str, default="./work_dir/models/nipple_test_original/V8/nipple_original_best.pth")
-    parser.add_argument("--band_model", type=str, default="./work_dir/models/nipple_test_band/V8/nipple_band_best.pth")
+    parser.add_argument("--original_model", type=str, default="./work_dir/models/nipple_test_original/V9/nipple_original_best.pth")
+    parser.add_argument("--band_model", type=str, default="./work_dir/models/nipple_test_band/V9/nipple_band_best.pth")
     parser.add_argument("--val_ann", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json")
     parser.add_argument("--val_dir", type=str, default="/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val")
     parser.add_argument("--band_dir", type=str, default="/home/suzhiling/efficientnet/bands/v2/val_band", help="band 裁剪目录（val）")

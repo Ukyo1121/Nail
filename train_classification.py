@@ -108,7 +108,7 @@ class MultiTaskEfficientNetB0(nn.Module):
                  pretrained=True, freeze_blocks=0, dropout=0.0):
         super(MultiTaskEfficientNetB0, self).__init__()
         self.backbone = mobilenet_v3_large(pretrained=pretrained)
-        in_features = self.backbone.classifier[0].in_features  # 960
+        in_features = self.backbone.classifier[0].in_features  # 576
         self.backbone.classifier = nn.Identity()
 
         # 冻结 backbone 前 freeze_blocks 层 (features 共 ~18 层)
@@ -403,27 +403,27 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Multi-task classification training with EfficientNet-B0")
 
-    parser.add_argument('--train_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/annotations/train_classification.json', help="Path to training annotation file")
+    parser.add_argument('--train_ann', type=str, default='/home/suzhiling/efficientnet/annotations/train_classification_B.json', help="Path to training annotation file")
     parser.add_argument('--train_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/train', help="Path to training image directory")
-    parser.add_argument('--old_train_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/train_classification.json', help="Path to old training annotation file (optional, for concatenation)")
+    parser.add_argument('--old_train_ann', type=str, default='/home/suzhiling/efficientnet/annotations/train_classification_A.json', help="Path to old training annotation file (optional, for concatenation)")
     parser.add_argument('--old_train_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/train', help="Path to old training image directory (optional, for concatenation)")
-    parser.add_argument('--val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/annotations/val_classification.json', help="Path to validation annotation file")
+    parser.add_argument('--val_ann', type=str, default='/home/suzhiling/efficientnet/annotations/val_classification_B.json', help="Path to validation annotation file")
     parser.add_argument('--val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Bclass/batch1/output/val', help="Path to validation image directory")
-    parser.add_argument('--old_val_ann', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/annotations/val_classification.json', help="Path to old validation annotation file (optional, for concatenation)")
+    parser.add_argument('--old_val_ann', type=str, default='/home/suzhiling/efficientnet/annotations/val_classification_A.json', help="Path to old validation annotation file (optional, for concatenation)")
     parser.add_argument('--old_val_dir', type=str, default='/data/zhangxiaohao/dazhouV2/Aclass/all_new/output/val', help="Path to old validation image directory (optional, for concatenation)")
-    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification/V9/', help="Directory to save models and logs")
+    parser.add_argument('--output_dir', type=str, default='./work_dir/models/classification_new/V1/', help="Directory to save models and logs")
     parser.add_argument('--model_save_name', type=str, default='mobilenet_classification',
                         help="Directory to save models and logs")
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--epochs', type=int, default=150)
+    parser.add_argument('--epochs', type=int, default=250)
     parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--eval_freq', type=int, default=4, help="Evaluate every N epochs")
     parser.add_argument('--patience', type=int, default=10, help="Early stopping patience (eval cycles)")
     parser.add_argument('--sigma', type=float, default=0.5, help="Gaussian sigma for ordinal soft labels")
     parser.add_argument('--lambda_reg', type=float, default=0.3, help="Weight for regression loss")
-    parser.add_argument('--freeze_blocks', type=int, default=0, help="冻结 backbone 前 N 层 (0 表示不冻结)")
-    parser.add_argument('--dropout', type=float, default=0.2, help="Dropout rate (0 表示不添加)")
+    parser.add_argument('--freeze_blocks', type=int, default=2, help="冻结 backbone 前 N 层 (0 表示不冻结)")
+    parser.add_argument('--dropout', type=float, default=0.3, help="Dropout rate (0 表示不添加)")
     parser.add_argument('--label_smoothing', type=float, default=0.1, help="标签平滑系数 (0 表示不平滑)")
 
     args = parser.parse_args()

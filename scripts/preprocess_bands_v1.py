@@ -8,7 +8,7 @@ import os
 import argparse
 import glob
 
-from edge_extract import extract_and_save_band
+from scripts.edge_extract import extract_and_save_band
 
 
 def main(args):

@@ -28,6 +28,7 @@ class ShapeTubesDataset(Dataset):
 
         # 获取图像信息
         img_info = self.coco.loadImgs(img_id)[0]
+        quality = img_info.get('quality', -1)
         img_path = os.path.join(self.root, img_info['file_name'])
         img = cv2.imread(img_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -47,7 +48,8 @@ class ShapeTubesDataset(Dataset):
                 'bleed_speed': [],
                 'rbc_aggregation': []
             },
-            'image_id': torch.tensor([img_id])
+            'image_id': torch.tensor([img_id]),
+            'quality': quality
         }
 
         for ann in anns:
@@ -285,6 +287,7 @@ class ClassificationDataset(Dataset):
     def __getitem__(self, idx):
         image_id = self.image_ids[idx]
         image_info = self.coco.loadImgs(image_id)[0]
+        quality = image_info.get('quality', -1)
         image_filename = image_info['file_name']
         image_path = os.path.join(self.root, image_filename)
         image = Image.open(image_path).convert('RGB')
@@ -292,7 +295,7 @@ class ClassificationDataset(Dataset):
         ann_ids = self.coco.getAnnIds(imgIds=image_id)
         annotations = self.coco.loadAnns(ann_ids)
 
-        targets = {'venous': -1, 'nipple': -1, 'arrangement': -1, 'base_transparency': -1}
+        targets = {'venous': -1, 'nipple': -1, 'arrangement': -1, 'base_transparency': -1, 'quality': quality}
         for ann in annotations:
             attr_name = self.cat_id_to_attr.get(ann['category_id'])
             if attr_name and attr_name in targets:
